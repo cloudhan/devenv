@@ -1,0 +1,20 @@
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+SHELL ["/bin/bash", "-c"]
+
+RUN apt-get update
+
+RUN apt-get -y install git wget curl && apt-get clean -y
+
+ENV MAMBA_ROOT_PREFIX=/root/micromamba CONDA_PREFIX=/root/micromamba
+RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -C /usr/local -xvj bin/micromamba && \
+    eval "$(./bin/micromamba shell hook -s posix)" && \
+    /usr/local/bin/micromamba shell -y init -s bash -p ~/micromamba && \
+    source ~/.bashrc && \
+    micromamba config -y append channels conda-forge && \
+    micromamba config -y set channel_priority strict
+
+RUN micromamba install -y python=3.10 helix=24.03 pip cmake ninja ccache
+RUN micromamba run pip install jupyter numpy matplotlib
+
+RUN curl -Ls 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' | tar -C /usr/local/bin -xvz
