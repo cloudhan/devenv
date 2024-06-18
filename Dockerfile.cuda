@@ -6,15 +6,36 @@ RUN apt-get update
 
 RUN apt-get -y install git wget curl && apt-get clean -y
 
-ENV MAMBA_ROOT_PREFIX=/root/micromamba CONDA_PREFIX=/root/micromamba
+ENV MAMBA_ROOT_PREFIX=/root/micromamba
+# NOTE: env CONDA_PREFIX is needed to run micromamba install commands but is conflict with `auto_activate_base true`.
+# Once set, we cannot delete the env entry from env table, so do just don't do it!
+#     CONDA_PREFIX=/root/micromamba
+
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -C /usr/local -xvj bin/micromamba && \
     eval "$(./bin/micromamba shell hook -s posix)" && \
     /usr/local/bin/micromamba shell -y init -s bash -p ~/micromamba && \
     source ~/.bashrc && \
     micromamba config -y append channels conda-forge && \
-    micromamba config -y set channel_priority strict
+    micromamba config -y set channel_priority strict && \
+    micromamba config -y set auto_activate_base true
 
-RUN micromamba install -y python=3.10 helix=24.03 pip cmake ninja ccache
-RUN micromamba run pip install jupyter numpy matplotlib
+RUN export CONDA_PREFIX=${MAMBA_ROOT_PREFIX} && \
+    micromamba install -y \
+        python=3.10 pip \
+        helix=24.03 cmake ninja ccache clang-tools \
+    && \
+    micromamba clean -y -f -a
+RUN export CONDA_PREFIX=${MAMBA_ROOT_PREFIX} && \
+    micromamba run pip install \
+        jupyter numpy matplotlib \
+        pyright ruff-lsp yapf black \
+    && \
+    micromamba clean -y -f -a
 
 RUN curl -Ls 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' | tar -C /usr/local/bin -xvz
+
+RUN mkdir -p ~/.config && \
+    git clone https://github.com/cloudhan/helix-config.git ~/.config/helix && \
+    export CONDA_PREFIX=${MAMBA_ROOT_PREFIX} && \
+    micromamba run hx --grammar fetch && \
+    micromamba run hx --grammar build
