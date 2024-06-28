@@ -2,9 +2,15 @@ FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
 
 SHELL ["/bin/bash", "-c"]
 
-RUN apt-get update
+COPY add-ppa.sh /usr/local/bin/
 
-RUN apt-get -y install git wget curl && apt-get clean -y
+RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${GNUPGHOME} && \
+    add-ppa.sh git-core/ppa E1DD270288B4E6030699E45FA1715D88E1DF1F24 && \
+    add-ppa.sh fish-shell/release-3 59FDA1CE1B84B3FAD89366C027557F056DC33CA5 && \
+    rm -rf /tmp/add-ppa-gnupg
+
+RUN apt-get update
+RUN apt-get -y install git wget curl fish tmux && apt-get clean -y
 
 ENV MAMBA_ROOT_PREFIX=/root/micromamba
 # NOTE: env CONDA_PREFIX is needed to run micromamba install commands but is conflict with `auto_activate_base true`.
@@ -12,7 +18,7 @@ ENV MAMBA_ROOT_PREFIX=/root/micromamba
 #     CONDA_PREFIX=/root/micromamba
 
 RUN curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -C /usr/local -xvj bin/micromamba && \
-    eval "$(./bin/micromamba shell hook -s posix)" && \
+    eval "$(/usr/local/bin/micromamba shell hook -s posix)" && \
     /usr/local/bin/micromamba shell -y init -s bash -p ~/micromamba && \
     source ~/.bashrc && \
     micromamba config -y append channels conda-forge && \
@@ -39,3 +45,5 @@ RUN mkdir -p ~/.config && \
     export CONDA_PREFIX=${MAMBA_ROOT_PREFIX} && \
     micromamba run hx --grammar fetch && \
     micromamba run hx --grammar build
+
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && cargo install --locked git-branchless
