@@ -63,4 +63,14 @@ RUN rm -rf /root/.cache && mkdir -p /root/.cache && \
     ln -sf /home/guangyunhan/.cache/conda /root/.cache/conda && \
     ln -sf /home/guangyunhan/.cache/huggingface /root/.cache/huggingface
 
+RUN export BAZELISK_VERSION=v1.20.0 && \
+    wget https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64 -qO /usr/local/bin/bazelisk-${BAZELISK_VERSION} && \
+    chmod a+x /usr/local/bin/bazelisk-${BAZELISK_VERSION} && \
+    ln -sf /usr/local/bin/bazelisk-${BAZELISK_VERSION} /usr/local/bin/bazelisk && \
+    ln -sf /usr/local/bin/bazelisk-${BAZELISK_VERSION} /usr/local/bin/bazel
+RUN export BUILDIFIER_VERSION=v7.1.2 && \
+    https://github.com/bazelbuild/buildtools/releases/download/${BUILDIFIER_VERSION}/buildifier-linux-amd64 -qO /usr/local/bin/buildifier-${BAZELISK_VERSION} && \
+    chmod a+x /usr/local/bin/buildifier-${BAZELISK_VERSION} && \
+    ln -sf /usr/local/bin/buildifier-${BAZELISK_VERSION} /usr/local/bin/buildifier
+
 # RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && cargo install --locked git-branchless
