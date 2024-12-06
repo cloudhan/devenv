@@ -1,0 +1,45 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-c"]
+
+COPY add-ppa.sh /usr/local/bin/
+
+RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${GNUPGHOME} && \
+    add-ppa.sh git-core/ppa E1DD270288B4E6030699E45FA1715D88E1DF1F24 && \
+    add-ppa.sh fish-shell/release-3 59FDA1CE1B84B3FAD89366C027557F056DC33CA5 && \
+    rm -rf /tmp/add-ppa-gnupg
+
+RUN apt-get update && \
+    apt-get -y install \
+        git wget curl fish tmux file tree \
+        strace ltrace libcapstone-dev libelf-dev libdw-dev libtraceevent-dev libluajit-5.1-dev && \
+    apt-get -y clean
+
+RUN pip install -U pip && \
+    pip install cmake ninja pre-commit
+
+RUN export CCACHE_VERSION=4.10.2 && \
+    curl -Ls https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz | tar -C /usr/local/bin -xvJ ccache-${CCACHE_VERSION}-linux-x86_64/ccache
+
+RUN export GIT_BRANCHLESS_VERSION=0.10.0 && \
+    curl -Ls https://github.com/arxanas/git-branchless/releases/download/v${GIT_BRANCHLESS_VERSION}/git-branchless-v${GIT_BRANCHLESS_VERSION}-x86_64-unknown-linux-musl.tar.gz | tar -C /usr/local/bin -xvz ./git-branchless
+
+RUN export HELIX_VERSION=24.07 && \
+    curl -Ls https://github.com/helix-editor/helix/releases/download/${HELIX_VERSION}/helix-${HELIX_VERSION}-x86_64-linux.tar.xz | tar -C /opt -xvJ && \
+    ln -sf /opt/helix-24.07-x86_64-linux/hx /usr/local/bin/hx
+
+# RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && \
+#     cargo install --locked git-branchless && \
+#     cargo install cargo-cache && \
+#     cargo cache --remove-dir all
+
+RUN echo "/usr/local/tensorrt/targets/x86_64-linux-gnu/lib" > /etc/ld.so.conf.d/hgy.conf && \
+    echo "/usr/local/cuda-12.6/compat/lib.real" >> /etc/ld.so.conf.d/hgy.conf && \
+    ldconfig
+
+RUN apt-get update && apt-get install -y sudo
+# RUN useradd -M -s /usr/bin/fish -u 144174 -g 30 -G sudo guangyunh
+RUN useradd -M -s /usr/bin/fish -u 144174 -g 30 guangyunh && echo 'ALL            ALL = (ALL) NOPASSWD: ALL' > /etc/sudoers
+USER guangyunh
+SHELL ["/usr/bin/fish", "--init-command", "cd ~"]
