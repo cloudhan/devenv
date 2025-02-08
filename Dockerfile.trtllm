@@ -1,5 +1,5 @@
-ARG BASE_IMAGE
-FROM ${BASE_IMAGE}
+ARG BASE_IMAGE=
+FROM ${BASE_IMAGE:-intentionally-left-as-black-but-fill-in-invalid-image-to-shut-the-fuck-up-invalid-default-arg-in-from}
 
 SHELL ["/bin/bash", "-c"]
 
@@ -12,12 +12,17 @@ RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${
 
 RUN apt-get update && \
     apt-get -y install \
-        git wget curl fish tmux file tree \
+        git wget curl fish tmux file tree 'bsdtar|libarchive-tools' \
         strace ltrace libcapstone-dev libelf-dev libdw-dev libtraceevent-dev libluajit-5.1-dev && \
     apt-get -y clean
 
 RUN pip install -U pip && \
-    pip install cmake ninja pre-commit
+    pip install cmake pre-commit
+
+RUN export NINJA_VERSION=1.12.1 \
+    curl -Ls https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-linux.zip | bsdtar -C /usr/local/bin -xv
+# always colorize with ninja
+ENV CLICOLOR_FORCE=1
 
 RUN export CCACHE_VERSION=4.10.2 && \
     curl -Ls https://github.com/ccache/ccache/releases/download/v${CCACHE_VERSION}/ccache-${CCACHE_VERSION}-linux-x86_64.tar.xz | tar -C /usr/local/bin -xvJ ccache-${CCACHE_VERSION}-linux-x86_64/ccache
@@ -25,9 +30,14 @@ RUN export CCACHE_VERSION=4.10.2 && \
 RUN export GIT_BRANCHLESS_VERSION=0.10.0 && \
     curl -Ls https://github.com/arxanas/git-branchless/releases/download/v${GIT_BRANCHLESS_VERSION}/git-branchless-v${GIT_BRANCHLESS_VERSION}-x86_64-unknown-linux-musl.tar.gz | tar -C /usr/local/bin -xvz ./git-branchless
 
-RUN export HELIX_VERSION=24.07 && \
-    curl -Ls https://github.com/helix-editor/helix/releases/download/${HELIX_VERSION}/helix-${HELIX_VERSION}-x86_64-linux.tar.xz | tar -C /opt -xvJ && \
-    ln -sf /opt/helix-24.07-x86_64-linux/hx /usr/local/bin/hx
+RUN export HELIX_VERSION=25.01.1 && mkdir /opt/helix && \
+    curl -Ls https://github.com/helix-editor/helix/releases/download/${HELIX_VERSION}/helix-${HELIX_VERSION}-x86_64-linux.tar.xz | tar -C /opt/helix -xvJ --strip-components=1 && \
+    ln -sf /opt/helix/hx /usr/local/bin/hx
+
+RUN export CLANGD_VERSION=19.1.2 && mkdir /opt/clangd && \
+    curl -Ls https://github.com/clangd/clangd/releases/download/${CLANGD_VERSION}/clangd-linux-${CLANGD_VERSION}.zip | bsdtar -C /opt/clangd -xv --strip-components=1 && \
+    chmod a+x /opt/clangd/bin/clangd && \
+    ln -sf /opt/clangd/bin/clangd /usr/local/bin/clangd
 
 # RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && source "$HOME/.cargo/env" && \
 #     cargo install --locked git-branchless && \
