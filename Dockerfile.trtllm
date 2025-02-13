@@ -11,6 +11,7 @@ RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${
     rm -rf /tmp/add-ppa-gnupg
 
 RUN apt-get update && \
+    apt-get -y remove ninja-build && \
     apt-get -y install \
         git wget curl fish tmux file tree 'bsdtar|libarchive-tools' \
         strace ltrace libcapstone-dev libelf-dev libdw-dev libtraceevent-dev libluajit-5.1-dev && \
@@ -19,8 +20,9 @@ RUN apt-get update && \
 RUN pip install -U pip && \
     pip install cmake pre-commit
 
-RUN export NINJA_VERSION=1.12.1 \
-    curl -Ls https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-linux.zip | bsdtar -C /usr/local/bin -xv
+RUN export NINJA_VERSION=1.12.1 && \
+    curl -Ls https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/ninja-linux.zip | bsdtar -C /usr/local/bin -xv && \
+    chmod a+x /usr/local/bin/ninja
 # always colorize with ninja
 ENV CLICOLOR_FORCE=1
 

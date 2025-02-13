@@ -4,7 +4,7 @@ cd $(dirname $(realpath $0))
 
 docker run \
   --runtime nvidia --gpus "device=$NV_GPU" \
-  --name hgy-trtllm-devcontainer -dit --rm\
+  --name hgy-trtllm-devcontainer -dit --init --rm\
   --ulimit memlock=-1 --cap-add=SYS_ADMIN \
   --network host \
   -e HGY_HOST_UID=$(id -u) \
