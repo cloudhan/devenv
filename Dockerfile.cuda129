@@ -1,0 +1,39 @@
+FROM nvcr.io/nvidia/cuda:12.9.1-devel-ubuntu24.04
+
+COPY add-ppa.sh /usr/local/bin/
+
+RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${GNUPGHOME} && \
+    add-ppa.sh git-core/ppa E1DD270288B4E6030699E45FA1715D88E1DF1F24 && \
+    add-ppa.sh fish-shell/release-3 59FDA1CE1B84B3FAD89366C027557F056DC33CA5 && \
+    rm -rf /tmp/add-ppa-gnupg
+
+RUN apt-get update && \
+    apt-get -y install \
+        sudo git wget curl bash fish tmux file tree htop 'bsdtar|libarchive-tools' \
+    && \
+    apt-get -y clean
+
+ENV PIXI_BIN_DIR='/usr/local/bin' \
+    PIXI_HOME='/opt/pixi' \
+    PIXI_CACHE_DIR='/opt/pixi/cache' \
+    PIXI_PROJECT_MANIFEST='/opt/pixi/pixi.toml'
+RUN mkdir -p "$PIXI_HOME" && \
+    chmod 4777 "$PIXI_HOME"
+
+RUN useradd -M -s /usr/bin/fish -u 144174 -g 30 guangyunh && \
+    echo 'ALL            ALL = (ALL) NOPASSWD: ALL' > /etc/sudoers
+
+RUN export TMP_DIR=/tmp/pixi && \
+    export PIXI_NO_PATH_UPDATE=1 && \
+    curl -fsSL https://pixi.sh/install.sh | sh && \
+    rm -rf "$TMP_DIR"
+
+USER guangyunh
+
+COPY envs/cuda129.pixi.toml "$PIXI_PROJECT_MANIFEST"
+RUN pixi config set detached-environments "$PIXI_HOME/envs" && \
+    sudo chmod 777 "$PIXI_PROJECT_MANIFEST" && \
+    pixi install -m "$PIXI_PROJECT_MANIFEST"
+
+RUN pixi shell-hook --shell fish | sudo tee /etc/fish/conf.d/pixi.fish
+SHELL ["/usr/bin/fish", "--init-command", "cd ~"]
