@@ -7,11 +7,22 @@ RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${
     add-ppa.sh fish-shell/release-3 59FDA1CE1B84B3FAD89366C027557F056DC33CA5 && \
     rm -rf /tmp/add-ppa-gnupg
 
+# libdw-dev is required by nsys
 RUN apt-get update && \
     apt-get -y install \
-        sudo git wget curl bash fish tmux file tree htop 'bsdtar|libarchive-tools' \
+        sudo git wget curl bash fish tmux file tree htop jq 'bsdtar|libarchive-tools' \
+        libdw-dev \
     && \
     apt-get -y clean
+
+RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
+    echo 'deb http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' >> /etc/apt/sources.list.d/llvm.list && \
+    apt-get update && \
+    apt-get -y install clangd && \
+    apt-get -y clean
+
+RUN export GIT_BRANCHLESS_VERSION=0.10.0 && \
+    curl -Ls https://github.com/arxanas/git-branchless/releases/download/v${GIT_BRANCHLESS_VERSION}/git-branchless-v${GIT_BRANCHLESS_VERSION}-x86_64-unknown-linux-musl.tar.gz | tar -C /usr/local/bin -xvz ./git-branchless
 
 ENV PIXI_BIN_DIR='/usr/local/bin' \
     PIXI_HOME='/opt/pixi' \
@@ -35,5 +46,10 @@ RUN pixi config set detached-environments "$PIXI_HOME/envs" && \
     sudo chmod 777 "$PIXI_PROJECT_MANIFEST" && \
     pixi install -m "$PIXI_PROJECT_MANIFEST"
 
-RUN pixi shell-hook --shell fish | sudo tee /etc/fish/conf.d/pixi.fish
+# setup shell hook with dynamically constructed PATH
+# `pixi shell-hook` will produced hardcoded PATH
+RUN export PREFIX=$(pixi info --json | jq -r '.environments_info.[0].prefix') && \
+    echo "set -gx PATH $PREFIX/bin \$PATH" | sudo tee -a /etc/fish/conf.d/pixi.fish && \
+    pixi shell-hook --shell fish | grep -v PATH | sudo tee -a /etc/fish/conf.d/pixi.fish
+
 SHELL ["/usr/bin/fish", "--init-command", "cd ~"]

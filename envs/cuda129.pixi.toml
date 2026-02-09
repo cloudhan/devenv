@@ -26,3 +26,4 @@ flash_attn = { url = "https://github.com/Dao-AILab/flash-attention/releases/down
 torch = { version = "==2.7.1", index = "https://download.pytorch.org/whl/cu128" }
 torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 torchao = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
+nvidia-cutlass-dsl = ">=4.3.5, <5"

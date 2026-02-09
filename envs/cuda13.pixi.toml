@@ -25,3 +25,4 @@ pytest = ">=9.0.2,<10"
 torch = { version = "==2.9.1", index = "https://download.pytorch.org/whl/cu130" }
 torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu130" }
 torchao = { version = "*", index = "https://download.pytorch.org/whl/cu130" }
+nvidia-cutlass-dsl = ">=4.3.5, <5"
