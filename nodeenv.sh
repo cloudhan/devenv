@@ -2,7 +2,7 @@
 
 # jump machine patterns
 
-if [[ $(hostname -s) =~ (computelab|container-xterm) ]]; then
+if [[ $(hostname -s) =~ (computelab|container-xterm|ipp1-1428|ipp1-1429|ipp1-1334) ]]; then
   printf "\x1B[32mTip: You are on a jump machine ($(hostname -s))\x1B[0m\n"
 else
   printf "\x1B[32mTip: You are on a compute node ($(hostname -s))\x1B[0m\n"

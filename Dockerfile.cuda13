@@ -8,11 +8,18 @@ RUN export GNUPGHOME=/tmp/add-ppa-gnupg && mkdir -p ${GNUPGHOME} && chmod 700 ${
     rm -rf /tmp/add-ppa-gnupg
 
 # libdw-dev is required by nsys
+# bubblewrap socat are required by AI sandboxing
 RUN apt-get update && \
     apt-get -y install \
         sudo git wget curl bash fish tmux file tree htop jq 'bsdtar|libarchive-tools' \
-        libdw-dev \
+        libdw-dev bubblewrap socat\
     && \
+    apt-get -y clean
+
+RUN wget -qO /etc/apt/keyrings/githubcli-archive-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get -y install gh && \
     apt-get -y clean
 
 RUN wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc && \
@@ -51,5 +58,7 @@ RUN pixi config set detached-environments "$PIXI_HOME/envs" && \
 RUN export PREFIX=$(pixi info --json | jq -r '.environments_info.[0].prefix') && \
     echo "set -gx PATH $PREFIX/bin \$PATH" | sudo tee -a /etc/fish/conf.d/pixi.fish && \
     pixi shell-hook --shell fish | grep -v PATH | sudo tee -a /etc/fish/conf.d/pixi.fish
+
+# RUN pixi run npm install -g @openai/codex@latest
 
 SHELL ["/usr/bin/fish", "--init-command", "cd ~"]

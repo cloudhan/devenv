@@ -98,7 +98,7 @@ run() {
     docker run \
         --runtime nvidia --gpus "$gpus_arg" \
         --name "$CONTAINER_NAME" -dit --init --rm\
-        --ulimit memlock=-1 --cap-add=SYS_ADMIN \
+        --ulimit memlock=-1 --cap-add=SYS_ADMIN --cap-add=NET_ADMIN \
         --network host \
         -e HGY_HOST_UID="$(id -u)" \
         -e HGY_DOCKER_ENV=1 \
