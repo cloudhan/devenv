@@ -1,0 +1,19 @@
+#!/bin/bash
+
+# Expects CLUSTER, SCRATCH from cluster-local cluster_env.sh (not in git).
+source "$(dirname "$(realpath "$0")")/cluster_env.sh"
+
+export ENROOT_CACHE_PATH=/tmp
+
+docker_image=nvidia/pytorch:26.08-py3
+enroot_image=${docker_image//[\/:]/+}
+ 
+enroot load docker://nvcr.io/${docker_image}
+
+set -ex
+
+enroot start --rw \
+    --mount /home/guangyunh:/home/guangyunh \
+    --mount "$SCRATCH:/workspace" \
+    --mount "$SCRATCH:$SCRATCH" \
+    ${enroot_image}
