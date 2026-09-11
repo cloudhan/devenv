@@ -1,0 +1,4 @@
+# Developer-only additions. The image's Python compute stack stays untouched.
+pytest>=9,<10
+pytest-flakefinder>=1.1,<2
+pre-commit>=4.6,<5

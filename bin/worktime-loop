@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -u
+
+usage() {
+    cat <<'EOF'
+Usage: worktime-loop TIME_ZONE START END REST_SECONDS COMMAND [ARG...]
+
+Run COMMAND repeatedly during the daily [START, END) work window, waiting
+REST_SECONDS after each run. Outside the window, sleep until the next START.
+
+TIME_ZONE is a UTC offset such as -8, +1, +05:30, or UTC-08:00.
+START and END are hours (0-23); a window such as 22 6 crosses midnight.
+
+Examples:
+  worktime-loop -8 7 17 120 echo "work..."
+  worktime-loop -8 7 17 120 crun -q system.hostname=blahblah \
+    -i -p "$HOME/workspaces/devenv/write_node_env.sh" -t 240 -g 1 --wait
+EOF
+}
+
+die() {
+    printf 'worktime-loop: %s\n' "$*" >&2
+    exit 2
+}
+
+if (( $# < 5 )); then
+    usage >&2
+    exit 2
+fi
+
+time_zone=$1
+start_hour=$2
+end_hour=$3
+rest_seconds=$4
+shift 4
+
+case $time_zone in
+    UTC*) offset=${time_zone#UTC} ;;
+    *)    offset=$time_zone ;;
+esac
+
+if [[ $offset =~ ^([+-]?)([0-9]{1,2})(:([0-9]{2}))?$ ]]; then
+    sign=${BASH_REMATCH[1]:-+}
+    offset_hours=$((10#${BASH_REMATCH[2]}))
+    offset_minutes=$((10#${BASH_REMATCH[4]:-0}))
+else
+    die "invalid TIME_ZONE '$time_zone' (expected an offset such as -8 or +05:30)"
+fi
+
+(( offset_hours <= 14 && offset_minutes < 60 )) || \
+    die "invalid TIME_ZONE '$time_zone'"
+offset_seconds=$((offset_hours * 3600 + offset_minutes * 60))
+[[ $sign == - ]] && offset_seconds=$((-offset_seconds))
+
+[[ $start_hour =~ ^[0-9]{1,2}$ ]] || die "START must be an hour from 0 to 23"
+[[ $end_hour =~ ^[0-9]{1,2}$ ]] || die "END must be an hour from 0 to 23"
+start_hour=$((10#$start_hour))
+end_hour=$((10#$end_hour))
+(( start_hour < 24 )) || die "START must be an hour from 0 to 23"
+(( end_hour < 24 )) || die "END must be an hour from 0 to 23"
+(( start_hour != end_hour )) || die "START and END must differ"
+
+[[ $rest_seconds =~ ^[0-9]+$ ]] || die "REST_SECONDS must be a positive integer"
+(( rest_seconds > 0 )) || die "REST_SECONDS must be a positive integer"
+
+sleep_until_worktime() {
+    local now local_epoch seconds_today wait_seconds
+    now=$(date +%s) || exit 1
+    local_epoch=$((now + offset_seconds))
+    seconds_today=$((local_epoch % 86400))
+    (( seconds_today < 0 )) && seconds_today=$((seconds_today + 86400))
+
+    if (( start_hour < end_hour )); then
+        if (( seconds_today >= start_hour * 3600 && seconds_today < end_hour * 3600 )); then
+            return 0
+        elif (( seconds_today < start_hour * 3600 )); then
+            wait_seconds=$((start_hour * 3600 - seconds_today))
+        else
+            wait_seconds=$((86400 - seconds_today + start_hour * 3600))
+        fi
+    else
+        if (( seconds_today >= start_hour * 3600 || seconds_today < end_hour * 3600 )); then
+            return 0
+        fi
+        wait_seconds=$((start_hour * 3600 - seconds_today))
+    fi
+
+    printf 'worktime-loop: off hours; sleeping %d seconds until %02d:00 (UTC%+03d:%02d)\n' \
+        "$wait_seconds" "$start_hour" "$((offset_seconds / 3600))" \
+        "$(((offset_seconds < 0 ? -offset_seconds : offset_seconds) % 3600 / 60))" >&2
+    sleep "$wait_seconds"
+}
+
+while true; do
+    sleep_until_worktime
+    "$@"
+    status=$?
+    if (( status != 0 )); then
+        printf 'worktime-loop: command exited with status %d\n' "$status" >&2
+    fi
+    sleep "$rest_seconds"
+done
