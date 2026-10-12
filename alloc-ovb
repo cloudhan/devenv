@@ -58,8 +58,8 @@ def fields(line):
 
 
 @contextmanager
-def allocated_pane_name(hostname):
-    """Temporarily name the calling pane, restoring its original override."""
+def allocated_tab_name(hostname):
+    """Temporarily name the calling tab, restoring its previous display name."""
     target = None
     for prefix, executable in (("HERDIST", "herdist"), ("HERDR", "herdr")):
         pane_id = os.environ.get(f"{prefix}_PANE_ID", "").strip()
@@ -71,46 +71,47 @@ def allocated_pane_name(hostname):
         if binary:
             target = (binary, pane_id)
         else:
-            print(f"alloc-ovb: cannot rename pane: {executable} is unavailable", file=sys.stderr)
+            print(f"alloc-ovb: cannot rename tab: {executable} is unavailable", file=sys.stderr)
         break
 
-    def pane_command(*args):
+    def api_command(group, *args):
         result = subprocess.run(
-            [target[0], "pane", *args], text=True, capture_output=True, timeout=5,
+            [target[0], group, *args], text=True, capture_output=True, timeout=5,
         )
         if result.returncode:
             raise ValueError(result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
         return result.stdout
 
-    def pane_label():
-        pane = json.loads(pane_command("get", target[1]))["result"]["pane"]
-        if pane["pane_id"] != target[1]:
-            raise ValueError("pane inspection returned a different pane")
-        label = pane.get("label")
-        if label is not None and not isinstance(label, str):
-            raise ValueError("pane inspection returned an invalid label")
-        return label
+    def tab_label(tab_id):
+        tab = json.loads(api_command("tab", "get", tab_id))["result"]["tab"]
+        if tab["tab_id"] != tab_id or not isinstance(tab["label"], str):
+            raise ValueError("tab inspection returned an unexpected tab or label")
+        return tab["label"]
 
     errors = (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError)
     restore = None
     if target:
         try:
-            previous = pane_label()
+            pane = json.loads(api_command("pane", "get", target[1]))["result"]["pane"]
+            if pane["pane_id"] != target[1]:
+                raise ValueError("pane inspection returned a different pane")
+            tab_id = pane["tab_id"]
+            previous = tab_label(tab_id)
             # Retain the restore target even if a rename times out after applying.
-            restore = [previous] if previous is not None else ["--clear"]
-            pane_command("rename", target[1], hostname)
+            restore = (tab_id, previous)
+            api_command("tab", "rename", tab_id, hostname)
         except errors as error:
-            print(f"alloc-ovb: cannot rename pane: {error}", file=sys.stderr)
+            print(f"alloc-ovb: cannot rename tab: {error}", file=sys.stderr)
     try:
         yield
     finally:
         if restore is not None:
             try:
                 # Preserve any name the user changes during the allocation.
-                if pane_label() == hostname:
-                    pane_command("rename", target[1], *restore)
+                if tab_label(restore[0]) == hostname:
+                    api_command("tab", "rename", *restore)
             except errors as error:
-                print(f"alloc-ovb: cannot restore pane name: {error}", file=sys.stderr)
+                print(f"alloc-ovb: cannot restore tab name: {error}", file=sys.stderr)
 
 
 def main():
@@ -206,8 +207,8 @@ def main():
     print("Queued jobs may receive a shorter duration to finish by the cutoff.")
     print(shlex.join(command), flush=True)
     if not args.dry_run:
-        # Keep this frontend process alive so cleanup can restore the pane name.
-        with allocated_pane_name(args.node):
+        # Keep this frontend process alive so cleanup can restore the tab name.
+        with allocated_tab_name(args.node):
             result = subprocess.run(command, env=environment)
         return result.returncode if result.returncode >= 0 else 128 - result.returncode
 
