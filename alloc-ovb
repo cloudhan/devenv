@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+"""Allocate an oversubscribed Slurm node until at most Sunday 06:00 UTC+8."""
+
+import argparse
+import datetime as dt
+import math
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+from zoneinfo import ZoneInfo
+
+
+QOS = "oversubscribe"
+ZONE = ZoneInfo("Asia/Shanghai")
+
+
+def duration_seconds(value):
+    """Parse Slurm's minutes, [days-]HH:MM:SS, and unlimited values."""
+    value = value.strip()
+    if value.upper() in {"UNLIMITED", "INFINITE"}:
+        return math.inf
+    if not re.fullmatch(r"(?:\d+-)?\d+(?::\d+){0,2}", value):
+        raise ValueError(f"cannot interpret Slurm time limit {value!r}")
+    days, clock = value.split("-", 1) if "-" in value else ("0", value)
+    parts = [int(part) for part in clock.split(":")]
+    if len(parts) == 1:
+        seconds = parts[0] * (3600 if "-" in value else 60)
+    elif len(parts) == 2:
+        seconds = parts[0] * (3600 if "-" in value else 60) + parts[1] * (60 if "-" in value else 1)
+    else:
+        seconds = parts[0] * 3600 + parts[1] * 60 + parts[2]
+    return int(days) * 86400 + seconds
+
+
+def sunday_cutoff(now):
+    local = now.astimezone(ZONE)
+    date = local.date() + dt.timedelta(days=(6 - local.weekday()) % 7)
+    cutoff = dt.datetime.combine(date, dt.time(6), tzinfo=ZONE)
+    if cutoff <= local:
+        cutoff += dt.timedelta(days=7)
+    return cutoff
+
+
+def query(argv, environment):
+    result = subprocess.run(argv, env=environment, text=True, capture_output=True, timeout=60)
+    if result.returncode:
+        raise ValueError(f"{shlex.join(argv)} failed: {result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout
+
+
+def fields(line):
+    return dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Query live Slurm limits, allocate an oversubscribed node, then open a shell. "
+        "The allocation ends no later than next Sunday 06:00 Asia/Shanghai (UTC+8). "
+        "Run on the cluster frontend; Python 3.9+ and Slurm tools are required.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="query limits and print the request without allocating")
+    parser.add_argument("node", help="one exact node hostname, e.g. ipp2-0038")
+    parser.add_argument("post_init", nargs="?", help="shell script accessible on the node; run with bash before the interactive shell")
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.node):
+        parser.error("node must be one hostname, not a Slurm range or list")
+    for command in ("sinfo", "scontrol", "sacctmgr", "srun"):
+        if not shutil.which(command):
+            parser.error(f"{command} is missing; run this helper on the cluster frontend")
+
+    # Request a new allocation, never a step in an inherited (possibly expired) job.
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("SLURM_", "SLURMD_", "SRUN_"))}
+    post_init = str(Path(args.post_init).expanduser().absolute()) if args.post_init else ""
+    if post_init and Path(post_init).exists() and not Path(post_init).is_file():
+        parser.error("post-init must be a file")
+
+    qos_rows = query(["sacctmgr", "-nP", "show", "qos", QOS, "format=Name,MaxWall,Flags"], environment)
+    qos_limit = None
+    qos_flags = set()
+    for line in qos_rows.splitlines():
+        columns = line.strip().split("|")
+        if len(columns) >= 3 and columns[0] == QOS:
+            qos_limit = duration_seconds(columns[1]) if columns[1] else math.inf
+            qos_flags = set(columns[2].split(","))
+            break
+    if qos_limit is None:
+        raise ValueError("Slurm did not return the oversubscribe QoS; cannot determine a safe duration")
+
+    names = query(["sinfo", "-N", "-h", "-n", args.node, "-o", "%P"], environment)
+    partitions = sorted({name.strip().rstrip("*") for name in names.splitlines()
+                         if name.strip().startswith("ovsb/")})
+    candidates = []
+    for partition in partitions:
+        metadata = query(["scontrol", "show", "partition", partition, "-o"], environment)
+        info = next((fields(line) for line in metadata.splitlines()
+                     if fields(line).get("PartitionName") == partition), {})
+        if not info or info.get("State") != "UP":
+            continue
+        allowed = set(info.get("AllowQos", "ALL").split(","))
+        denied = set(info.get("DenyQos", "").split(","))
+        if ("ALL" not in allowed and QOS not in allowed) or QOS in denied:
+            continue
+        partition_limit = duration_seconds(info["MaxTime"])
+        limits = [qos_limit, partition_limit]
+        # Slurm permits a job QoS to override the partition's wall limit only with this flag.
+        if "PartitionTimeLimit" in qos_flags:
+            limits = [qos_limit]
+        partition_qos = info.get("QoS", "N/A")
+        if partition_qos not in {"N/A", "(null)", QOS}:
+            data = query(["sacctmgr", "-nP", "show", "qos", partition_qos, "format=Name,MaxWall"], environment)
+            found = False
+            for row in data.splitlines():
+                columns = row.strip().split("|")
+                if len(columns) >= 2 and columns[0] == partition_qos:
+                    limits.append(duration_seconds(columns[1]) if columns[1] else math.inf)
+                    found = True
+            if not found:
+                raise ValueError(f"cannot determine partition QoS limit for {partition_qos}")
+        candidates.append((min(limits), partition))
+    if not candidates:
+        raise ValueError(f"{args.node} has no UP ovsb/ partition allowing {QOS}")
+    limit, partition = max(candidates)
+    now = dt.datetime.now(dt.timezone.utc)
+    cutoff = sunday_cutoff(now)
+    minutes = math.floor(min(limit, (cutoff - now).total_seconds()) / 60)
+    if minutes < 1:
+        raise ValueError("less than one full minute is available before the cutoff")
+
+    # Slurm parses --deadline in the client's local timezone, not the cutoff timezone.
+    deadline = cutoff.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    command = ["srun", f"--job-name=alloc-ovb-{args.node}", f"--nodelist={args.node}",
+               f"--partition={partition}", f"--qos={QOS}", "--oversubscribe",
+               "--nodes=1", "--ntasks=1", f"--time={minutes}", "--time-min=1",
+               f"--deadline={deadline}", "--pty", "bash", "-c",
+               'if [ -n "$1" ]; then bash -- "$1" || exit $?; fi; exec bash -l',
+               "alloc-ovb", post_init]
+    print(f"Node: {args.node}\nPartition: {partition}\nQoS: {QOS}")
+    print(f"Maximum requested duration: {minutes} minutes")
+    print(f"Sunday cutoff: {cutoff:%Y-%m-%d %H:%M %Z} (UTC+8)")
+    print(f"Expiry if started now: {(now + dt.timedelta(minutes=minutes)).astimezone(ZONE):%Y-%m-%d %H:%M %Z}")
+    print("Queued jobs may receive a shorter duration to finish by the cutoff.")
+    print(shlex.join(command), flush=True)
+    if not args.dry_run:
+        os.execvpe(command[0], command, environment)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"alloc-ovb: {error}")
+    except KeyboardInterrupt:
+        sys.exit(130)
