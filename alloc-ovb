@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Allocate an oversubscribed Slurm node until at most Sunday 06:00 UTC+8."""
+"""Allocate an oversubscribed Slurm node until at most Sunday 08:00 UTC."""
 
 import argparse
+from contextlib import contextmanager
 import datetime as dt
 import math
+import json
 import os
 from pathlib import Path
 import re
@@ -11,11 +13,10 @@ import shlex
 import shutil
 import subprocess
 import sys
-from zoneinfo import ZoneInfo
 
 
 QOS = "oversubscribe"
-ZONE = ZoneInfo("Asia/Shanghai")
+ZONE = dt.timezone.utc
 
 
 def duration_seconds(value):
@@ -39,7 +40,7 @@ def duration_seconds(value):
 def sunday_cutoff(now):
     local = now.astimezone(ZONE)
     date = local.date() + dt.timedelta(days=(6 - local.weekday()) % 7)
-    cutoff = dt.datetime.combine(date, dt.time(6), tzinfo=ZONE)
+    cutoff = dt.datetime.combine(date, dt.time(8), tzinfo=ZONE)
     if cutoff <= local:
         cutoff += dt.timedelta(days=7)
     return cutoff
@@ -56,10 +57,66 @@ def fields(line):
     return dict(re.findall(r"(?:^|\s)(\w+)=([^\s]+)", line))
 
 
+@contextmanager
+def allocated_pane_name(hostname):
+    """Temporarily name the calling pane, restoring its original override."""
+    target = None
+    for prefix, executable in (("HERDIST", "herdist"), ("HERDR", "herdr")):
+        pane_id = os.environ.get(f"{prefix}_PANE_ID", "").strip()
+        if os.environ.get(f"{prefix}_ENV") != "1" or not pane_id:
+            continue
+        binary = shutil.which(os.environ.get(f"{prefix}_BIN_PATH", executable))
+        if not binary:
+            binary = shutil.which(executable)
+        if binary:
+            target = (binary, pane_id)
+        else:
+            print(f"alloc-ovb: cannot rename pane: {executable} is unavailable", file=sys.stderr)
+        break
+
+    def pane_command(*args):
+        result = subprocess.run(
+            [target[0], "pane", *args], text=True, capture_output=True, timeout=5,
+        )
+        if result.returncode:
+            raise ValueError(result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}")
+        return result.stdout
+
+    def pane_label():
+        pane = json.loads(pane_command("get", target[1]))["result"]["pane"]
+        if pane["pane_id"] != target[1]:
+            raise ValueError("pane inspection returned a different pane")
+        label = pane.get("label")
+        if label is not None and not isinstance(label, str):
+            raise ValueError("pane inspection returned an invalid label")
+        return label
+
+    errors = (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError)
+    restore = None
+    if target:
+        try:
+            previous = pane_label()
+            # Retain the restore target even if a rename times out after applying.
+            restore = [previous] if previous is not None else ["--clear"]
+            pane_command("rename", target[1], hostname)
+        except errors as error:
+            print(f"alloc-ovb: cannot rename pane: {error}", file=sys.stderr)
+    try:
+        yield
+    finally:
+        if restore is not None:
+            try:
+                # Preserve any name the user changes during the allocation.
+                if pane_label() == hostname:
+                    pane_command("rename", target[1], *restore)
+            except errors as error:
+                print(f"alloc-ovb: cannot restore pane name: {error}", file=sys.stderr)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Query live Slurm limits, allocate an oversubscribed node, then open a shell. "
-        "The allocation ends no later than next Sunday 06:00 Asia/Shanghai (UTC+8). "
+        "The allocation ends no later than next Sunday 08:00 UTC. "
         "Run on the cluster frontend; Python 3.9+ and Slurm tools are required.",
     )
     parser.add_argument("--dry-run", action="store_true", help="query limits and print the request without allocating")
@@ -75,6 +132,9 @@ def main():
     # Request a new allocation, never a step in an inherited (possibly expired) job.
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("SLURM_", "SLURMD_", "SRUN_"))}
+    # Slurm parses absolute deadlines in the client timezone; force UTC so
+    # every user submits the same instant regardless of their local TZ or DST.
+    environment["TZ"] = "UTC"
     post_init = str(Path(args.post_init).expanduser().absolute()) if args.post_init else ""
     if post_init and Path(post_init).exists() and not Path(post_init).is_file():
         parser.error("post-init must be a file")
@@ -131,8 +191,8 @@ def main():
     if minutes < 1:
         raise ValueError("less than one full minute is available before the cutoff")
 
-    # Slurm parses --deadline in the client's local timezone, not the cutoff timezone.
-    deadline = cutoff.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+    # The srun client receives TZ=UTC, matching this UTC deadline.
+    deadline = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
     command = ["srun", f"--job-name=alloc-ovb-{args.node}", f"--nodelist={args.node}",
                f"--partition={partition}", f"--qos={QOS}", "--oversubscribe",
                "--nodes=1", "--ntasks=1", f"--time={minutes}", "--time-min=1",
@@ -141,17 +201,20 @@ def main():
                "alloc-ovb", post_init]
     print(f"Node: {args.node}\nPartition: {partition}\nQoS: {QOS}")
     print(f"Maximum requested duration: {minutes} minutes")
-    print(f"Sunday cutoff: {cutoff:%Y-%m-%d %H:%M %Z} (UTC+8)")
+    print(f"Sunday cutoff: {cutoff:%Y-%m-%d %H:%M %Z}")
     print(f"Expiry if started now: {(now + dt.timedelta(minutes=minutes)).astimezone(ZONE):%Y-%m-%d %H:%M %Z}")
     print("Queued jobs may receive a shorter duration to finish by the cutoff.")
     print(shlex.join(command), flush=True)
     if not args.dry_run:
-        os.execvpe(command[0], command, environment)
+        # Keep this frontend process alive so cleanup can restore the pane name.
+        with allocated_pane_name(args.node):
+            result = subprocess.run(command, env=environment)
+        return result.returncode if result.returncode >= 0 else 128 - result.returncode
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except (ValueError, OSError, subprocess.TimeoutExpired) as error:
         sys.exit(f"alloc-ovb: {error}")
     except KeyboardInterrupt:
