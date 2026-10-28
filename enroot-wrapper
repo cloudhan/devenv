@@ -1,10 +1,7 @@
 #!/bin/bash
 
-# Expects CLUSTER, SCRATCH from cluster-local cluster_env.sh (not in git).
-repo_dir="$(dirname "$(realpath "$0")")"
-source "$repo_dir/cluster_env.sh"
-
 export ENROOT_CACHE_PATH=/tmp
+export WORKSPACES=$(realpath ~/workspaces)
 
 docker_image=nvidia/pytorch:26.08-py3
 enroot_image=${docker_image//[\/:]/+}
@@ -15,11 +12,7 @@ set -ex
 
 enroot start -r --rw \
     --mount /home/guangyunh:/home/guangyunh \
-    --mount "$SCRATCH:/workspace" \
-    --mount "$SCRATCH:$SCRATCH" \
-    --mount "$repo_dir:/workspace/devenv" \
+    --mount "$WORKSPACES:/workspace" \
+    --mount "$WORKSPACES:$WORKSPACES" \
     "${enroot_image}" \
-    bash -c -i 'cd /workspace/devenv && exec fish -i'
-    # bash -c 'cd /workspace/devenv && exec fish -i'
-
-
+    bash -i -c '/workspace/devenv/bootstrap-in-enroot.sh && exec fish -i'
