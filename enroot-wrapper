@@ -11,8 +11,9 @@ enroot load docker://nvcr.io/${docker_image}
 set -ex
 
 enroot start -r --rw \
-    --mount /home/guangyunh:/home/guangyunh \
+    --mount /home:/home \
     --mount "$WORKSPACES:/workspace" \
     --mount "$WORKSPACES:$WORKSPACES" \
+    --mount /mnt:/mnt \
     "${enroot_image}" \
     bash -i -c '/workspace/devenv/bootstrap-in-enroot.sh && exec fish -i'
