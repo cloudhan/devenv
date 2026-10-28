@@ -13,6 +13,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from zoneinfo import ZoneInfo
 
 
 QOS = "oversubscribe"
@@ -44,6 +45,50 @@ def sunday_cutoff(now):
     if cutoff <= local:
         cutoff += dt.timedelta(days=7)
     return cutoff
+
+
+def allocation_command(node, partition, minutes, cutoff, post_init):
+    # The srun client receives TZ=UTC, matching this UTC deadline.
+    deadline = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
+    return ["srun", f"--job-name=alloc-ovb-{node}", f"--nodelist={node}",
+            f"--partition={partition}", f"--qos={QOS}", "--oversubscribe",
+            "--nodes=1", "--ntasks=1", f"--time={minutes}", "--time-min=1",
+            f"--deadline={deadline}", "--pty", "bash", "-c",
+            'if [ -n "$1" ]; then bash -- "$1" || exit $?; fi; exec bash -l',
+            "alloc-ovb", post_init]
+
+
+def validated_allocation(node, partition, limit, requested_cutoff, post_init, environment):
+    """Discover stricter site deadlines through a no-allocation Slurm preflight."""
+    cutoff = requested_cutoff
+    for _ in range(3):
+        now = dt.datetime.now(ZONE)
+        # Leave one minute for preflight/submission latency at a hard deadline.
+        minutes = math.floor(min(limit, (cutoff - now).total_seconds() - 60) / 60)
+        if minutes < 1:
+            raise ValueError("less than one usable minute is available before the cutoff")
+        command = allocation_command(node, partition, minutes, cutoff, post_init)
+        result = subprocess.run(
+            [command[0], "--test-only", *command[1:]], env=environment,
+            text=True, capture_output=True, timeout=60,
+        )
+        if result.returncode == 0:
+            return command, minutes, cutoff, now
+        message = (result.stderr + "\n" + result.stdout).strip()
+        match = re.search(
+            r"weekly reboot cutoff (\d{4}-\d{2}-\d{2} \d{2}:\d{2}) "
+            r"\S+ \(([^)]+)\)", message,
+        )
+        if match:
+            site_cutoff = dt.datetime.strptime(match[1], "%Y-%m-%d %H:%M").replace(
+                tzinfo=ZoneInfo(match[2]),
+            ).astimezone(ZONE)
+            if now < site_cutoff < cutoff:
+                cutoff = site_cutoff
+                continue
+        # Do not retry other policy/authentication/resource errors as allocations.
+        raise ValueError(f"Slurm preflight failed: {message or f'exit {result.returncode}'}")
+    raise ValueError("Slurm's cutoff changed repeatedly; no allocation was submitted")
 
 
 def query(argv, environment):
@@ -117,10 +162,10 @@ def allocated_tab_name(hostname):
 def main():
     parser = argparse.ArgumentParser(
         description="Query live Slurm limits, allocate an oversubscribed node, then open a shell. "
-        "The allocation ends no later than next Sunday 08:00 UTC. "
+        "The allocation ends no later than next Sunday 08:00 UTC, or an earlier cluster reboot cutoff. "
         "Run on the cluster frontend; Python 3.9+ and Slurm tools are required.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="query limits and print the request without allocating")
+    parser.add_argument("--dry-run", action="store_true", help="query limits, preflight Slurm policy, and print the request without allocating")
     parser.add_argument("node", help="one exact node hostname, e.g. ipp2-0038")
     parser.add_argument("post_init", nargs="?", help="shell script accessible on the node; run with bash before the interactive shell")
     args = parser.parse_args()
@@ -186,24 +231,17 @@ def main():
     if not candidates:
         raise ValueError(f"{args.node} has no UP ovsb/ partition allowing {QOS}")
     limit, partition = max(candidates)
-    now = dt.datetime.now(dt.timezone.utc)
-    cutoff = sunday_cutoff(now)
-    minutes = math.floor(min(limit, (cutoff - now).total_seconds()) / 60)
-    if minutes < 1:
-        raise ValueError("less than one full minute is available before the cutoff")
-
-    # The srun client receives TZ=UTC, matching this UTC deadline.
-    deadline = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
-    command = ["srun", f"--job-name=alloc-ovb-{args.node}", f"--nodelist={args.node}",
-               f"--partition={partition}", f"--qos={QOS}", "--oversubscribe",
-               "--nodes=1", "--ntasks=1", f"--time={minutes}", "--time-min=1",
-               f"--deadline={deadline}", "--pty", "bash", "-c",
-               'if [ -n "$1" ]; then bash -- "$1" || exit $?; fi; exec bash -l',
-               "alloc-ovb", post_init]
+    requested_cutoff = sunday_cutoff(dt.datetime.now(ZONE))
+    command, minutes, cutoff, now = validated_allocation(
+        args.node, partition, limit, requested_cutoff, post_init, environment,
+    )
     print(f"Node: {args.node}\nPartition: {partition}\nQoS: {QOS}")
     print(f"Maximum requested duration: {minutes} minutes")
-    print(f"Sunday cutoff: {cutoff:%Y-%m-%d %H:%M %Z}")
+    print(f"Sunday cutoff: {requested_cutoff:%Y-%m-%d %H:%M %Z}")
+    if cutoff < requested_cutoff:
+        print(f"Cluster reboot cutoff: {cutoff:%Y-%m-%d %H:%M %Z} (earlier limit applies)")
     print(f"Expiry if started now: {(now + dt.timedelta(minutes=minutes)).astimezone(ZONE):%Y-%m-%d %H:%M %Z}")
+    print("Slurm preflight passed; one minute is reserved for submission at the cutoff.")
     print("Queued jobs may receive a shorter duration to finish by the cutoff.")
     print(shlex.join(command), flush=True)
     if not args.dry_run:

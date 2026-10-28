@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Allocate a regular Slurm GPU node for its maximum permitted batch duration."""
+
+import argparse
+import math
+import os
+from pathlib import Path
+import re
+import runpy
+import shlex
+import shutil
+import subprocess
+import sys
+
+
+# Keep allocation context and Slurm parsing consistent with the sibling helper.
+common = runpy.run_path(str(Path(__file__).resolve().with_name("alloc-ovb")))
+query = common["query"]
+fields = common["fields"]
+duration_seconds = common["duration_seconds"]
+allocated_tab_name = common["allocated_tab_name"]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Allocate a regular GPU node using live batch QoS/partition limits, "
+        "then open an interactive shell. Run on the cluster frontend.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="query limits and preflight without allocating")
+    parser.add_argument("--gpus", type=int, default=1, help="GPUs per node (default: 1)")
+    parser.add_argument("node", help="one exact node hostname")
+    parser.add_argument("post_init", nargs="?", help="shell script accessible on the node; run before the interactive shell")
+    args = parser.parse_args()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.node):
+        parser.error("node must be one hostname, not a Slurm range or list")
+    if args.gpus < 1:
+        parser.error("--gpus must be positive")
+    for command in ("sinfo", "scontrol", "sacctmgr", "srun"):
+        if not shutil.which(command):
+            parser.error(f"{command} is missing; run this helper on the cluster frontend")
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("SLURM_", "SLURMD_", "SRUN_"))}
+    environment["TZ"] = "UTC"
+    post_init = str(Path(args.post_init).expanduser().absolute()) if args.post_init else ""
+    if post_init and Path(post_init).exists() and not Path(post_init).is_file():
+        parser.error("post-init must be a file")
+
+    qos_rows = query(["sacctmgr", "-nP", "show", "qos", "format=Name,MaxWall,Flags"], environment)
+    qos_limits = {}
+    for line in qos_rows.splitlines():
+        columns = line.strip().split("|")
+        if len(columns) >= 3:
+            qos_limits[columns[0]] = (
+                duration_seconds(columns[1]) if columns[1] else math.inf,
+                set(columns[2].split(",")),
+            )
+    batch_qoses = [name for name in ("batch", "batch-short") if name in qos_limits]
+    if not batch_qoses:
+        raise ValueError("Slurm did not return batch or batch-short QoS; cannot determine a safe duration")
+
+    names = query(["sinfo", "-N", "-h", "-n", args.node, "-o", "%P"], environment)
+    partitions = sorted({line.strip().rstrip("*") for line in names.splitlines()
+                         if line.strip() and not line.strip().startswith("ovsb/")})
+    candidates = []
+    rejections = []
+    for partition in partitions:
+        metadata = query(["scontrol", "show", "partition", partition, "-o"], environment)
+        info = next((fields(line) for line in metadata.splitlines()
+                     if fields(line).get("PartitionName") == partition), {})
+        if not info or info.get("State") != "UP" or info.get("ReqResv") == "YES":
+            rejections.append(f"{partition}: unavailable, not UP, or requires a reservation")
+            continue
+        allowed = set(info.get("AllowQos", "ALL").split(","))
+        denied = set(info.get("DenyQos", "").split(","))
+        eligible_qoses = [qos for qos in batch_qoses
+                          if ("ALL" in allowed or qos in allowed) and qos not in denied]
+        if not eligible_qoses:
+            rejections.append(f"{partition}: AllowQos={info.get('AllowQos', 'ALL')} "
+                              f"DenyQos={info.get('DenyQos', '')}")
+            continue
+        for qos in eligible_qoses:
+            qos_limit, qos_flags = qos_limits[qos]
+            limits = [qos_limit]
+            if "PartitionTimeLimit" not in qos_flags:
+                limits.append(duration_seconds(info["MaxTime"]))
+            partition_qos = info.get("QoS", "N/A")
+            if partition_qos not in {"N/A", "(null)", qos}:
+                if partition_qos not in qos_limits:
+                    raise ValueError(f"cannot determine partition QoS limit for {partition_qos}")
+                if "OverPartQOS" not in qos_flags:
+                    limits.append(qos_limits[partition_qos][0])
+            limit = min(limits)
+            minutes = 0 if math.isinf(limit) else math.floor(limit / 60)
+            if math.isinf(limit) or minutes >= 1:
+                candidates.append((limit, minutes, partition, qos))
+            else:
+                rejections.append(f"{partition} ({qos}): less than one usable minute")
+    if not candidates:
+        detail = "\n".join(rejections) or "Slurm returned no regular partitions"
+        raise ValueError(f"{args.node} has no UP regular partition allowing a batch allocation:\n{detail}")
+    # Prefer regular batch even if another QoS permits a longer duration.
+    candidates.sort(key=lambda candidate: (candidate[3] == "batch", candidate[0], candidate[2]), reverse=True)
+    failures = []
+    for _, minutes, partition, qos in candidates:
+        command = ["srun", f"--job-name=alloc-{args.node}", f"--nodelist={args.node}",
+                   f"--partition={partition}", f"--qos={qos}", "--nodes=1", "--ntasks=1",
+                   f"--gpus-per-node={args.gpus}", f"--time={minutes}", "--pty", "bash", "-c",
+                   'if [ -n "$1" ]; then bash -- "$1" || exit $?; fi; exec bash -l',
+                   "alloc", post_init]
+        result = subprocess.run([command[0], "--test-only", *command[1:]],
+                                env=environment, text=True, capture_output=True, timeout=60)
+        if result.returncode == 0:
+            break
+        failures.append(f"{partition} ({qos}): {(result.stderr or result.stdout).strip() or f'exit {result.returncode}'}")
+    else:
+        raise ValueError("Slurm preflight failed; no allocation submitted:\n" + "\n".join(failures))
+    duration = f"{minutes} minutes" if minutes else "unlimited"
+    print(f"Node: {args.node}\nPartition: {partition}\nQoS: {qos}\nGPUs: {args.gpus}")
+    print(f"Maximum requested duration: {duration}\nSlurm preflight passed.")
+    print(shlex.join(command), flush=True)
+    if not args.dry_run:
+        with allocated_tab_name(args.node):
+            result = subprocess.run(command, env=environment)
+        return result.returncode if result.returncode >= 0 else 128 - result.returncode
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        sys.exit(f"alloc: {error}")
+    except KeyboardInterrupt:
+        sys.exit(130)
